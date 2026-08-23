@@ -5,6 +5,12 @@ from yt_dlp import YoutubeDL
 
 GKEY = os.environ.get("GEMINI_API_KEY", "").strip()
 FORCE = os.environ.get("FORCE", "").strip()   # auto / 큐티인 / 주일예배 / 수요예배
+COOKIES = os.environ.get("YT_COOKIES", "")            # 유튜브 쿠키(netscape) — 봇차단 우회
+COOKIEFILE = None
+if COOKIES.strip():
+    COOKIEFILE = "yt_cookies.txt"
+    with open(COOKIEFILE, "w", encoding="utf-8") as _f:
+        _f.write(COOKIES)
 OUT = "summaries.json"
 MODELS = ["gemini-flash-latest","gemini-2.5-flash","gemini-2.0-flash","gemini-2.5-flash-lite","gemini-1.5-flash-latest"]
 # 유튜브 봇차단 우회용 클라이언트 (데이터센터 IP에서도 뚫릴 확률↑)
@@ -12,6 +18,7 @@ YCLIENTS = ["tv","ios","mweb","web"]
 def yopts(extra=None):
     o = {"quiet":True,"skip_download":True,"noplaylist":False,
          "extractor_args":{"youtube":{"player_client":YCLIENTS}}}
+    if COOKIEFILE: o["cookiefile"] = COOKIEFILE
     if extra: o.update(extra)
     return o
 

@@ -1,11 +1,12 @@
 # 우리들교회 자동 요약 → summaries.json
-# 큐티인(매일) + 주일예배 + 수요예배 를 시간대에 맞춰 자동 요약.
-import os, json, re, html, urllib.request, datetime
-from yt_dlp import YoutubeDL
+# 최신 영상: RSS(공개 XML)로 확실히 / 자막: youtube-transcript-api / 요약: Gemini
+import os, json, re, urllib.request, datetime
+import xml.etree.ElementTree as ET
+from youtube_transcript_api import YouTubeTranscriptApi
 
 GKEY = os.environ.get("GEMINI_API_KEY", "").strip()
-FORCE = os.environ.get("FORCE", "").strip()   # auto / 큐티인 / 주일예배 / 수요예배
-COOKIES = os.environ.get("YT_COOKIES", "")            # 유튜브 쿠키(netscape) — 봇차단 우회
+FORCE = os.environ.get("FORCE", "").strip()
+COOKIES = os.environ.get("YT_COOKIES", "")
 COOKIEFILE = None
 if COOKIES.strip():
     COOKIEFILE = "yt_cookies.txt"
@@ -13,14 +14,6 @@ if COOKIES.strip():
         _f.write(COOKIES)
 OUT = "summaries.json"
 MODELS = ["gemini-flash-latest","gemini-2.5-flash","gemini-2.0-flash","gemini-2.5-flash-lite","gemini-1.5-flash-latest"]
-# 유튜브 봇차단 우회용 클라이언트 (데이터센터 IP에서도 뚫릴 확률↑)
-YCLIENTS = ["tv","ios","mweb","web"]
-def yopts(extra=None):
-    o = {"quiet":True,"skip_download":True,"noplaylist":False,
-         "extractor_args":{"youtube":{"player_client":YCLIENTS}}}
-    if COOKIEFILE: o["cookiefile"] = COOKIEFILE
-    if extra: o.update(extra)
-    return o
 
 PL = {
   "큐티인":     "PLvn_5y4iSsmxh7NVg8yhk9eqdyPGkm6fg",
@@ -50,61 +43,39 @@ def decide_sources():
     if f == "큐티인":   return [("큐티인","큐티인")], SYS_QT
     if f == "수요예배": return [("사역자설교","수요예배")], SYS_SERMON
     if f == "주일예배": return [("주일설교","주일예배"),("사역자설교","주일예배")], SYS_SERMON
-    n = kst_now(); wd = n.weekday(); h = n.hour  # Mon=0 .. Sun=6
-    if wd == 2 and 21 <= h <= 23:            # 수요일 저녁
-        return [("사역자설교","수요예배")], SYS_SERMON
-    if wd == 6 and 16 <= h <= 18:            # 주일 오후
-        return [("주일설교","주일예배"),("사역자설교","주일예배")], SYS_SERMON
-    return [("큐티인","큐티인")], SYS_QT       # 그 외 = 큐티인(매일 새벽)
+    n = kst_now(); wd = n.weekday(); h = n.hour
+    if wd == 2 and 21 <= h <= 23: return [("사역자설교","수요예배")], SYS_SERMON
+    if wd == 6 and 16 <= h <= 18: return [("주일설교","주일예배"),("사역자설교","주일예배")], SYS_SERMON
+    return [("큐티인","큐티인")], SYS_QT
 
-def top_videos(plid, n=6):
-    with YoutubeDL(yopts({"extract_flat":"in_playlist","playlistend":n})) as y:
-        info = y.extract_info("https://www.youtube.com/playlist?list="+plid, download=False)
-    es = info.get("entries") or []
-    return [(e["id"], (e.get("title") or "")) for e in es if e and e.get("id")]
+def newest_from_rss(plid):
+    url = "https://www.youtube.com/feeds/videos.xml?playlist_id=" + plid
+    req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
+    xml = urllib.request.urlopen(req, timeout=30).read().decode("utf-8","ignore")
+    ns = {"a":"http://www.w3.org/2005/Atom","yt":"http://www.youtube.com/xml/schemas/2015"}
+    root = ET.fromstring(xml); out = []
+    for e in root.findall("a:entry", ns):
+        v = e.find("yt:videoId", ns); t = e.find("a:title", ns); p = e.find("a:published", ns)
+        if v is None or not v.text: continue
+        out.append((v.text, (t.text or "") if t is not None else "", (p.text or "") if p is not None else ""))
+    return out
 
-def full_info(vid):
-    with YoutubeDL(yopts({"writesubtitles":True,"writeautomaticsub":True,"subtitleslangs":["ko","ko-KR"]})) as y:
-        return y.extract_info("https://www.youtube.com/watch?v="+vid, download=False)
-
-def transcript_from(info):
-    tracks = None
-    for key in ("subtitles","automatic_captions"):
-        d = info.get(key) or {}
-        for k in d:
-            if k.startswith("ko"):
-                tracks = d[k]; break
-        if tracks: break
-    if not tracks: return ""
-    order = {"json3":0,"srv3":1,"srv1":2,"vtt":3}
-    tracks = sorted(tracks, key=lambda t: order.get(t.get("ext"), 9))
-    turl = tracks[0]["url"]; ext = tracks[0].get("ext")
-    data = urllib.request.urlopen(turl, timeout=60).read().decode("utf-8","ignore")
-    if ext == "json3":
-        j = json.loads(data); parts = []
-        for ev in j.get("events", []):
-            for s in ev.get("segs", []) or []:
-                parts.append(s.get("utf8",""))
-        text = "".join(parts)
-    elif ext == "vtt":
-        out = []
-        for ln in data.splitlines():
-            t = ln.strip()
-            if not t or "-->" in t or t.isdigit() or t.startswith("WEBVTT"): continue
-            out.append(t)
-        text = " ".join(out)
+def get_transcript(vid):
+    langs = ["ko","ko-KR","ko-x-autogen"]
+    if COOKIEFILE:
+        data = YouTubeTranscriptApi.get_transcript(vid, languages=langs, cookies=COOKIEFILE)
     else:
-        text = html.unescape(re.sub(r"<[^>]+>", " ", data))
-    text = re.sub(r"\[[^\]]*\]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+        data = YouTubeTranscriptApi.get_transcript(vid, languages=langs)
+    txt = " ".join((x.get("text","") or "") for x in data)
+    txt = re.sub(r"\[[^\]]*\]", " ", txt); txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
 
 def parse_title(title):
     title = title or ""
-    title = re.sub(r"\[[^\]]*\]", " ", title)   # [사역자설교] 같은 접두 제거
+    title = re.sub(r"\[[^\]]*\]", " ", title)
     parts = [p.strip() for p in re.split(r"[｜|/]", title) if p.strip()]
     m = re.search(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})", title)
-    date = "%04d-%02d-%02d" % (int(m.group(1)),int(m.group(2)),int(m.group(3))) if m else kst_now().strftime("%Y-%m-%d")
+    date = "%04d-%02d-%02d" % (int(m.group(1)),int(m.group(2)),int(m.group(3))) if m else ""
     refpat = re.compile(r"[가-힣]+\s*\d+\s*[:：]\s*\d+")
     prpat = re.compile(r"([가-힣A-Za-z]+\s*목사)")
     ref=""; subj=""; preacher=""
@@ -143,52 +114,48 @@ def load_db():
     except Exception: pass
     return {"sermons": []}
 
+def recent_ok(pub):
+    try:
+        d = datetime.datetime.strptime(pub[:10], "%Y-%m-%d")
+        return (kst_now() - d).days <= 2
+    except Exception:
+        return True
+
 def main():
-    if not GKEY: raise SystemExit("GEMINI_API_KEY 가 없어요 (GitHub Secret 확인)")
+    if not GKEY: raise SystemExit("GEMINI_API_KEY 가 없어요")
     sources, sys = decide_sources()
     db = load_db(); added = 0
     print("KST:", kst_now().strftime("%Y-%m-%d %H:%M (%a)"), "| FORCE:", FORCE or "auto", "| sources:", sources)
     for plname, cat in sources:
         try:
-            cands = top_videos(PL[plname])
+            cands = newest_from_rss(PL[plname])
         except Exception as ex:
-            print("목록 불러오기 실패:", plname, str(ex)[:100]); continue
-        for vid, title in cands:
+            print("RSS 실패:", plname, str(ex)[:100]); continue
+        print(plname, "후보:", [(v, t[:20]) for v,t,p in cands[:3]])
+        for vid, title, pub in cands:
             if any(s.get("vid")==vid and s.get("category")==cat for s in db["sermons"]):
-                print("최신은 이미 있음:", cat, plname, vid); break
+                print("최신은 이미 있음:", cat, vid); break
+            if cat != "큐티인" and not recent_ok(pub):
+                print("최근 업로드 아님 → 건너뜀:", cat, pub[:10], title[:30]); break
             try:
-                info = full_info(vid)
+                tr = get_transcript(vid)
             except Exception as ex:
-                print("영상 접근 불가(비공개 등) → 다음 후보:", vid, str(ex)[:80]); continue
-            if not title: title = info.get("title") or ""
-            date, subj, ref, preacher = parse_title(title)
-            ud = info.get("upload_date")
-            if cat != "큐티인" and ud:
-                try:
-                    d = datetime.datetime.strptime(ud, "%Y%m%d")
-                    if (kst_now() - d).days > 2:
-                        print("최근 업로드 아님 → 이 소스 건너뜀:", cat, ud, title[:30]); break
-                except Exception: pass
-            try:
-                tr = transcript_from(info)
-            except Exception as ex:
-                print("자막 오류 → 다음 후보:", vid, str(ex)[:80]); continue
+                print("자막 실패 → 다음 후보:", vid, str(ex)[:90]); continue
             if len(tr) < 200:
-                print("자막 아직 없음/짧음(나중 재시도):", vid, len(tr)); break
+                print("자막 짧음/없음:", vid, len(tr)); continue
             tr = tr[:45000]
+            date, subj, ref, preacher = parse_title(title)
+            if not date: date = pub[:10] or kst_now().strftime("%Y-%m-%d")
             try:
                 obj = summarize(sys, tr, subj, ref)
             except SystemExit as ex:
                 print("요약 실패:", str(ex)[:120]); break
             entry = {
-              "id": (date or vid) + "-" + cat,
-              "vid": vid, "date": date,
+              "id": date + "-" + cat, "vid": vid, "date": date,
               "title": obj.get("title") or subj or title[:30],
-              "ref": obj.get("ref") or ref,
-              "category": cat, "detail": "",
+              "ref": obj.get("ref") or ref, "category": cat, "detail": "",
               "preacher": obj.get("preacher") or preacher or ("김양재 목사" if cat=="큐티인" else ""),
-              "scripture": "",
-              "intro": obj.get("intro",""),
+              "scripture": "", "intro": obj.get("intro",""),
               "points": [{"text": p.get("text",""),
                           "summary": p.get("summary", p.get("sum", [])),
                           "apps": p.get("apps", [])} for p in (obj.get("points") or [])],

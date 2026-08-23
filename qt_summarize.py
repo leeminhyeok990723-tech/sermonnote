@@ -177,7 +177,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    print("추가됨:", key)
-
-if __name__ == "__main__":
-    main()

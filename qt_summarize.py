@@ -7,6 +7,13 @@ GKEY = os.environ.get("GEMINI_API_KEY", "").strip()
 FORCE = os.environ.get("FORCE", "").strip()   # auto / 큐티인 / 주일예배 / 수요예배
 OUT = "summaries.json"
 MODELS = ["gemini-flash-latest","gemini-2.5-flash","gemini-2.0-flash","gemini-2.5-flash-lite","gemini-1.5-flash-latest"]
+# 유튜브 봇차단 우회용 클라이언트 (데이터센터 IP에서도 뚫릴 확률↑)
+YCLIENTS = ["tv","ios","mweb","web"]
+def yopts(extra=None):
+    o = {"quiet":True,"skip_download":True,"noplaylist":False,
+         "extractor_args":{"youtube":{"player_client":YCLIENTS}}}
+    if extra: o.update(extra)
+    return o
 
 PL = {
   "큐티인":     "PLvn_5y4iSsmxh7NVg8yhk9eqdyPGkm6fg",
@@ -44,14 +51,13 @@ def decide_sources():
     return [("큐티인","큐티인")], SYS_QT       # 그 외 = 큐티인(매일 새벽)
 
 def top_videos(plid, n=6):
-    with YoutubeDL({"extract_flat":"in_playlist","playlistend":n,"quiet":True,"skip_download":True}) as y:
+    with YoutubeDL(yopts({"extract_flat":"in_playlist","playlistend":n})) as y:
         info = y.extract_info("https://www.youtube.com/playlist?list="+plid, download=False)
     es = info.get("entries") or []
     return [(e["id"], (e.get("title") or "")) for e in es if e and e.get("id")]
 
 def full_info(vid):
-    with YoutubeDL({"skip_download":True,"quiet":True,"writesubtitles":True,
-                    "writeautomaticsub":True,"subtitleslangs":["ko","ko-KR"]}) as y:
+    with YoutubeDL(yopts({"writesubtitles":True,"writeautomaticsub":True,"subtitleslangs":["ko","ko-KR"]})) as y:
         return y.extract_info("https://www.youtube.com/watch?v="+vid, download=False)
 
 def transcript_from(info):

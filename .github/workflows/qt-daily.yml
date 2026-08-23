@@ -29,6 +29,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FORCE: ${{ github.event.inputs.source }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: python qt_summarize.py
       - name: 저장(commit)
         run: |

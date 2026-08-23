@@ -43,12 +43,11 @@ def decide_sources():
         return [("주일설교","주일예배"),("사역자설교","주일예배")], SYS_SERMON
     return [("큐티인","큐티인")], SYS_QT       # 그 외 = 큐티인(매일 새벽)
 
-def newest_video(plid):
-    with YoutubeDL({"extract_flat":"in_playlist","playlistend":1,"quiet":True,"skip_download":True}) as y:
+def top_videos(plid, n=6):
+    with YoutubeDL({"extract_flat":"in_playlist","playlistend":n,"quiet":True,"skip_download":True}) as y:
         info = y.extract_info("https://www.youtube.com/playlist?list="+plid, download=False)
     es = info.get("entries") or []
-    if not es: return None, ""
-    e = es[0]; return e["id"], (e.get("title") or "")
+    return [(e["id"], (e.get("title") or "")) for e in es if e and e.get("id")]
 
 def full_info(vid):
     with YoutubeDL({"skip_download":True,"quiet":True,"writesubtitles":True,
@@ -137,40 +136,52 @@ def main():
     db = load_db(); added = 0
     print("KST:", kst_now().strftime("%Y-%m-%d %H:%M (%a)"), "| FORCE:", FORCE or "auto", "| sources:", sources)
     for plname, cat in sources:
-        vid, title = newest_video(PL[plname])
-        if not vid: print("빈 목록:", plname); continue
-        if any(s.get("vid")==vid and s.get("category")==cat for s in db["sermons"]):
-            print("이미 있음:", cat, plname, vid); continue
-        info = full_info(vid)
-        if not title: title = info.get("title") or ""
-        date, subj, ref, preacher = parse_title(title)
-        ud = info.get("upload_date")
-        if cat != "큐티인" and ud:
+        try:
+            cands = top_videos(PL[plname])
+        except Exception as ex:
+            print("목록 불러오기 실패:", plname, str(ex)[:100]); continue
+        for vid, title in cands:
+            if any(s.get("vid")==vid and s.get("category")==cat for s in db["sermons"]):
+                print("최신은 이미 있음:", cat, plname, vid); break
             try:
-                d = datetime.datetime.strptime(ud, "%Y%m%d")
-                if (kst_now() - d).days > 2:
-                    print("최근 업로드 아님, 건너뜀:", cat, ud, title[:30]); continue
-            except Exception: pass
-        tr = transcript_from(info)
-        if len(tr) < 200:
-            print("자막 없음/짧음:", vid, len(tr)); continue
-        tr = tr[:45000]
-        obj = summarize(sys, tr, subj, ref)
-        entry = {
-          "id": (date or vid) + "-" + cat,
-          "vid": vid, "date": date,
-          "title": obj.get("title") or subj or title[:30],
-          "ref": obj.get("ref") or ref,
-          "category": cat, "detail": "",
-          "preacher": obj.get("preacher") or preacher or ("김양재 목사" if cat=="큐티인" else ""),
-          "scripture": "",
-          "intro": obj.get("intro",""),
-          "points": [{"text": p.get("text",""),
-                      "summary": p.get("summary", p.get("sum", [])),
-                      "apps": p.get("apps", [])} for p in (obj.get("points") or [])],
-        }
-        db["sermons"].insert(0, entry); added += 1
-        print("추가됨:", cat, entry["id"], entry["title"])
+                info = full_info(vid)
+            except Exception as ex:
+                print("영상 접근 불가(비공개 등) → 다음 후보:", vid, str(ex)[:80]); continue
+            if not title: title = info.get("title") or ""
+            date, subj, ref, preacher = parse_title(title)
+            ud = info.get("upload_date")
+            if cat != "큐티인" and ud:
+                try:
+                    d = datetime.datetime.strptime(ud, "%Y%m%d")
+                    if (kst_now() - d).days > 2:
+                        print("최근 업로드 아님 → 이 소스 건너뜀:", cat, ud, title[:30]); break
+                except Exception: pass
+            try:
+                tr = transcript_from(info)
+            except Exception as ex:
+                print("자막 오류 → 다음 후보:", vid, str(ex)[:80]); continue
+            if len(tr) < 200:
+                print("자막 아직 없음/짧음(나중 재시도):", vid, len(tr)); break
+            tr = tr[:45000]
+            try:
+                obj = summarize(sys, tr, subj, ref)
+            except SystemExit as ex:
+                print("요약 실패:", str(ex)[:120]); break
+            entry = {
+              "id": (date or vid) + "-" + cat,
+              "vid": vid, "date": date,
+              "title": obj.get("title") or subj or title[:30],
+              "ref": obj.get("ref") or ref,
+              "category": cat, "detail": "",
+              "preacher": obj.get("preacher") or preacher or ("김양재 목사" if cat=="큐티인" else ""),
+              "scripture": "",
+              "intro": obj.get("intro",""),
+              "points": [{"text": p.get("text",""),
+                          "summary": p.get("summary", p.get("sum", [])),
+                          "apps": p.get("apps", [])} for p in (obj.get("points") or [])],
+            }
+            db["sermons"].insert(0, entry); added += 1
+            print("추가됨:", cat, entry["id"], entry["title"]); break
     db["sermons"] = db["sermons"][:200]
     json.dump(db, open(OUT,"w",encoding="utf-8"), ensure_ascii=False, indent=1)
     print("총 추가:", added)
